@@ -816,6 +816,7 @@ struct SelfdriveState {
   enabled @1 :Bool;
   active @2 :Bool;
   engageable @9 :Bool;  # can OP be engaged?
+  latOnlyActive @14 :Bool;  # always on lateral: steering is active while longitudinal is disengaged
 
   # UI alerts
   alertText1 @3 :Text;

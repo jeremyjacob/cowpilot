@@ -7,6 +7,7 @@ import openpilot.cereal.messaging as messaging
 
 from openpilot.cereal import log
 from opendbc.car.structs import car
+from opendbc.safety import ALTERNATIVE_EXPERIENCE
 from openpilot.cereal.visionipc import VisionStreamType
 from msgq.visionipc import VisionIpcClient
 
@@ -18,7 +19,7 @@ from openpilot.common.gps import get_gps_location_service
 
 from openpilot.selfdrive.car.car_events import CarEvents
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
-from openpilot.selfdrive.selfdrived.events import Events, ET
+from openpilot.selfdrive.selfdrived.events import Events, ET, EVENTS
 from openpilot.selfdrive.selfdrived.helpers import ExcessiveActuationCheck
 from openpilot.selfdrive.selfdrived.state import StateMachine
 from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroad_alert
@@ -44,6 +45,12 @@ AlertLevel = log.DriverMonitoringState.AlertLevel
 MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
+
+# Always on lateral: these end longitudinal engagement (or block it), but steering stays on
+LAT_ONLY_IGNORED_EVENTS = {EventName.pedalPressed, EventName.pcmDisable, EventName.buttonCancel, EventName.resumeBlocked,
+                           EventName.belowEngageSpeed, EventName.wrongCruiseMode, EventName.speedTooHigh}
+LAT_ONLY_BLOCKING_TYPES = (ET.NO_ENTRY, ET.USER_DISABLE, ET.SOFT_DISABLE, ET.IMMEDIATE_DISABLE)
+LAT_ONLY_TX_BLOCKED_LIMIT = 3  # consecutive pandaStates (~0.3s) with blocked messages
 
 
 class SelfdriveD:
@@ -116,6 +123,11 @@ class SelfdriveD:
     self.initialized = False
     self.enabled = False
     self.active = False
+    self.lat_only_allowed = bool(self.CP.alternativeExperience & ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL)
+    self.lat_only_active = False
+    self.lat_only_faulted = False
+    self.lat_only_tx_blocked = 0
+    self.lat_only_tx_blocked_cnt = 0
     self.mismatch_counter = 0
     self.cruise_mismatch_counter = 0
     self.last_steering_pressed_frame = 0
@@ -516,6 +528,33 @@ class SelfdriveD:
 
     return CS
 
+  def update_lat_only(self, CS):
+    """Always on lateral: steer while cruise main is on, independent of longitudinal engagement"""
+    lat_only_prev = self.lat_only_active
+
+    # the panda enters lateral-only controls on the rising edge of main or on engagement, and blocks steering otherwise.
+    # it doesn't report that state, so watch for blocked messages and wait for main to cycle or an engagement
+    tx_blocked = sum(ps.safetyTxBlocked for ps in self.sm['pandaStates'])
+    if self.sm.updated['pandaStates']:
+      blocked_increased = tx_blocked > self.lat_only_tx_blocked
+      self.lat_only_tx_blocked_cnt = self.lat_only_tx_blocked_cnt + 1 if (lat_only_prev and blocked_increased) else 0
+      self.lat_only_tx_blocked = tx_blocked
+    if self.lat_only_tx_blocked_cnt >= LAT_ONLY_TX_BLOCKED_LIMIT:
+      self.lat_only_faulted = True
+      self.lat_only_tx_blocked_cnt = 0
+      self.events.add(EventName.controlsMismatch)
+    if not CS.cruiseState.available or self.enabled:
+      self.lat_only_faulted = False
+
+    blocking = [e for e in self.events.names if e not in LAT_ONLY_IGNORED_EVENTS and
+                any(et in EVENTS.get(e, {}) for et in LAT_ONLY_BLOCKING_TYPES)]
+    self.lat_only_active = (self.lat_only_allowed and self.initialized and not self.CP.passive and not self.active and
+                            CS.cruiseState.available and not self.lat_only_faulted and not blocking)
+
+    # alert on unexpected exits, no alert when the driver turns off main or engages
+    if lat_only_prev and not self.lat_only_active and not self.active and CS.cruiseState.available:
+      self.state_machine.current_alert_types += [et for et in LAT_ONLY_BLOCKING_TYPES if et not in self.state_machine.current_alert_types]
+
   def update_alerts(self, CS):
     clear_event_types = set()
     if ET.WARNING not in self.state_machine.current_alert_types:
@@ -538,6 +577,7 @@ class SelfdriveD:
     ss.active = self.active
     ss.state = self.state_machine.state
     ss.engageable = not self.events.contains(ET.NO_ENTRY)
+    ss.latOnlyActive = self.lat_only_active
     ss.personality = self.personality
 
     ss.alertText1 = self.AM.current_alert.alert_text_1
@@ -563,6 +603,7 @@ class SelfdriveD:
     self.update_events(CS)
     if not self.CP.passive and self.initialized:
       self.enabled, self.active = self.state_machine.update(self.events)
+      self.update_lat_only(CS)
     self.update_alerts(CS)
 
     self.publish_selfdriveState(CS)

@@ -16,6 +16,17 @@ DESCRIPTIONS = {
     "Your attention is required at all times to use this feature."
   ),
   "DisengageOnAccelerator": tr_noop("When enabled, pressing the accelerator pedal will disengage openpilot."),
+  "AlwaysOnLateral": tr_noop(
+    "Steering assist stays active whenever cruise control's main switch is on, even when openpilot isn't controlling " +
+    "speed. Pressing the brake only disengages speed control. The screen border turns blue while only steering is active."
+  ),
+  "LaneChangeAcceleration": tr_noop(
+    "Follow the car ahead more closely while the left turn signal is on above 40 mph (64 km/h), to close the gap before passing. " +
+    "Requires openpilot longitudinal control."
+  ),
+  "LaneChangeAccelerationStrength": tr_noop(
+    "How much closer to follow during Lane Change Acceleration. Mild follows at 1.1 s, Medium at 0.85 s, and Strong at 0.6 s."
+  ),
   "LongitudinalPersonality": tr_noop(
     "Standard is recommended. In aggressive mode, openpilot will follow lead cars closer and be more aggressive with the gas and brake. " +
     "In relaxed mode openpilot will stay further away from lead cars. On supported cars, you can cycle through these personalities with " +
@@ -45,10 +56,22 @@ class TogglesLayout(Widget):
         "chffr_wheel.png",
         True,
       ),
+      "AlwaysOnLateral": (
+        lambda: tr("Always-On Lateral"),
+        DESCRIPTIONS["AlwaysOnLateral"],
+        "chffr_wheel.png",
+        True,
+      ),
       "DisengageOnAccelerator": (
         lambda: tr("Disengage on Accelerator Pedal"),
         DESCRIPTIONS["DisengageOnAccelerator"],
         "disengage_on_accelerator.png",
+        False,
+      ),
+      "LaneChangeAcceleration": (
+        lambda: tr("Lane Change Acceleration"),
+        DESCRIPTIONS["LaneChangeAcceleration"],
+        "speed_limit.png",
         False,
       ),
       "IsLdwEnabled": (
@@ -93,6 +116,16 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    self._lane_change_accel_strength = multiple_button_item(
+      lambda: tr("Lane Change Acceleration Strength"),
+      lambda: tr(DESCRIPTIONS["LaneChangeAccelerationStrength"]),
+      buttons=[lambda: tr("Mild"), lambda: tr("Medium"), lambda: tr("Strong")],
+      button_width=255,
+      callback=self._set_lane_change_accel_strength,
+      selected_index=self._params.get("LaneChangeAccelerationStrength", return_default=True),
+      icon="speed_limit.png"
+    )
+
     self._toggles = {}
     self._initial_cruise_speed = ListItem(
       title=lambda: tr("Initial Max Speed"),
@@ -134,6 +167,9 @@ class TogglesLayout(Widget):
       if param == "DisengageOnAccelerator":
         self._toggles["LongitudinalPersonality"] = self._long_personality_setting
         self._toggles["InitialCruiseSpeedKph"] = self._initial_cruise_speed
+      elif param == "LaneChangeAcceleration":
+        self._lane_change_accel_strength.set_visible(lambda: self._toggles["LaneChangeAcceleration"].action_item.get_state())
+        self._toggles["LaneChangeAccelerationStrength"] = self._lane_change_accel_strength
 
     self._scroller = Scroller(list(self._toggles.values()), line_separator=True, spacing=0)
 
@@ -178,6 +214,9 @@ class TogglesLayout(Widget):
 
     if self._toggle_defs[param][3]:
       self._params.put_bool("OnroadCycleRequested", True, block=True)
+
+  def _set_lane_change_accel_strength(self, button_index: int):
+    self._params.put("LaneChangeAccelerationStrength", button_index, block=True)
 
   def _set_longitudinal_personality(self, button_index: int):
     self._params.put("LongitudinalPersonality", button_index, block=True)

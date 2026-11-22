@@ -28,6 +28,7 @@ class UIStatus(Enum):
   DISENGAGED = "disengaged"
   ENGAGED = "engaged"
   OVERRIDE = "override"
+  LAT_ONLY = "lat_only"  # always on lateral: steering only
 
 
 class ChestnutState(Enum):
@@ -135,7 +136,7 @@ class UIState:
 
   @property
   def engaged(self) -> bool:
-    return self.started and self.sm["selfdriveState"].enabled
+    return self.started and (self.sm["selfdriveState"].enabled or self.sm["selfdriveState"].latOnlyActive)
 
   def is_onroad(self) -> bool:
     return self.started
@@ -200,7 +201,9 @@ class UIState:
       ss = self.sm["selfdriveState"]
       state = ss.state
 
-      if state in (log.SelfdriveState.OpenpilotState.preEnabled, log.SelfdriveState.OpenpilotState.overriding):
+      if ss.latOnlyActive:
+        self.status = UIStatus.LAT_ONLY
+      elif state in (log.SelfdriveState.OpenpilotState.preEnabled, log.SelfdriveState.OpenpilotState.overriding):
         self.status = UIStatus.OVERRIDE
       else:
         self.status = UIStatus.ENGAGED if ss.enabled else UIStatus.DISENGAGED

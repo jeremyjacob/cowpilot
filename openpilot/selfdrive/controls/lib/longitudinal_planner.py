@@ -5,12 +5,13 @@ import openpilot.cereal.messaging as messaging
 from opendbc.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.cereal import log
 from openpilot.common.constants import CV
+from openpilot.common.params import Params
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.controls.lib.curve_speed import CurveSpeed
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc, LongitudinalPlanSource, get_T_FOLLOW
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan, should_stop, smooth_value
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
@@ -21,6 +22,22 @@ J_CRUISE_BP = [0., 10.0, 25., 40.]
 A_CRUISE_MIN = -0.5
 AGGRESSIVE_ACCEL_BOOST = 0.1  # m/s^2
 CONTROL_N_T_IDX = ModelConstants.T_IDXS[:CONTROL_N]
+
+# Lane Change Acceleration: follow closer while signaling left at highway speed, to close in before passing
+LANE_CHANGE_ACCEL_MIN_SPEED = 40 * CV.MPH_TO_MS
+LANE_CHANGE_ACCEL_T_FOLLOW = [1.1, 0.85, 0.6]  # follow time (s) for mild, medium, strong
+LANE_CHANGE_ACCEL_RATE_DOWN = 0.5  # s/s, closing the gap
+LANE_CHANGE_ACCEL_RATE_UP = 0.2  # s/s, slowly back to the personality's distance, to avoid hard braking
+PARAMS_UPDATE_PERIOD = 1.0  # s
+
+
+def get_lane_change_accel_t_follow(t_follow_prev, personality, v_ego, left_blinker, enabled, strength, dt):
+  t_follow_base = get_T_FOLLOW(personality)
+  target = t_follow_base
+  if enabled and left_blinker and v_ego > LANE_CHANGE_ACCEL_MIN_SPEED:
+    strength = int(np.clip(strength, 0, len(LANE_CHANGE_ACCEL_T_FOLLOW) - 1))
+    target = min(t_follow_base, LANE_CHANGE_ACCEL_T_FOLLOW[strength])
+  return float(np.clip(target, t_follow_prev - LANE_CHANGE_ACCEL_RATE_DOWN * dt, t_follow_prev + LANE_CHANGE_ACCEL_RATE_UP * dt))
 
 
 def get_cruise_accel(v_cruise, v_ego, a_cruise_prev, a_target_prev, dt):
@@ -44,6 +61,12 @@ class LongitudinalPlanner:
     self.a_cruise = init_a
     self.output_a_target = init_a
     self.output_should_stop = False
+
+    self.params = Params()
+    self.params_frame = 0
+    self.lane_change_accel = self.params.get_bool("LaneChangeAcceleration")
+    self.lane_change_accel_strength = self.params.get("LaneChangeAccelerationStrength", return_default=True)
+    self.t_follow = get_T_FOLLOW()
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -77,12 +100,23 @@ class LongitudinalPlanner:
     # No change cost when user is controlling the speed, or when standstill
     prev_accel_constraint = not (reset_state or sm['carState'].standstill)
 
+    self.params_frame += 1
+    if self.params_frame >= PARAMS_UPDATE_PERIOD / self.dt:
+      self.params_frame = 0
+      self.lane_change_accel = self.params.get_bool("LaneChangeAcceleration")
+      self.lane_change_accel_strength = self.params.get("LaneChangeAccelerationStrength", return_default=True)
+
+    if reset_state:
+      self.t_follow = get_T_FOLLOW(personality)
+    self.t_follow = get_lane_change_accel_t_follow(self.t_follow, personality, v_ego, sm['carState'].leftBlinker,
+                                                   self.lane_change_accel, self.lane_change_accel_strength, self.dt)
+
     self.mpc.set_weights(prev_accel_constraint, personality=personality)
     if self.CP.openpilotLongitudinalControl:
       self.mpc.set_cur_state(self.v_desired_filter.x, self.output_a_target)
     else:
       self.mpc.set_cur_state(v_ego, sm['carState'].aEgo)
-    self.mpc.update(sm['radarState'], personality=personality)
+    self.mpc.update(sm['radarState'], personality=personality, t_follow=self.t_follow)
 
     self.v_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory = np.interp(CONTROL_N_T_IDX, T_IDXS_MPC, self.mpc.a_solution)

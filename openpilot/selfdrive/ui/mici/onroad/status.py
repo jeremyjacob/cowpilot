@@ -12,7 +12,8 @@ from openpilot.system.ui.lib.application import gui_app
 
 STATUS_FADE_RC = 0.25
 OVERRIDE_HOLD = 0.3
-STATUSES = tuple(UIStatus)
+# lateral-only shows as engaged on mici
+STATUSES = (UIStatus.DISENGAGED, UIStatus.ENGAGED, UIStatus.OVERRIDE)
 
 
 def lerp_color(a: rl.Color, b: rl.Color, t: float) -> rl.Color:
@@ -34,6 +35,8 @@ class StatusFade:
         self._override_time = now
       held = ui_state.status == UIStatus.ENGAGED and now - self._override_time < OVERRIDE_HOLD
       status = UIStatus.OVERRIDE if held else ui_state.status
+      if status == UIStatus.LAT_ONLY:
+        status = UIStatus.ENGAGED
       target = np.array([status == s for s in STATUSES], dtype=float)
       if self._weights is None:
         self._weights = FirstOrderFilter(target, STATUS_FADE_RC, 1 / gui_app.target_fps)

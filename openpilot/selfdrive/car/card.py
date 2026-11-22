@@ -20,6 +20,8 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from opendbc.car.toyota.values import ToyotaFlags
+from opendbc.safety import ALTERNATIVE_EXPERIENCE
 
 REPLAY = "REPLAY" in os.environ
 
@@ -56,6 +58,14 @@ def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket
     sendcan.send(can_list_to_can_capnp(msgs, msgtype='sendcan'))
 
   return can_recv, can_send
+
+
+def always_on_lateral_supported(CP: structs.CarParams) -> bool:
+  """Always on lateral needs the panda safety mode to track the cruise main switch"""
+  if CP.brand == "toyota":
+    # SecOC and unsupported DSU platforms report main on a different message
+    return not CP.secOcRequired and not (CP.flags & ToyotaFlags.UNSUPPORTED_DSU)
+  return CP.brand == "honda"
 
 
 class Car:
@@ -109,6 +119,8 @@ class Car:
       self.RI = RI
 
     self.CP.alternativeExperience = 0
+    if self.params.get_bool("AlwaysOnLateral") and always_on_lateral_supported(self.CP):
+      self.CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.ALWAYS_ON_LATERAL
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")
     controller_available = self.CI.CC is not None and openpilot_enabled_toggle and not self.CP.dashcamOnly
     self.CP.passive = not controller_available or self.CP.dashcamOnly
